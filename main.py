@@ -13,53 +13,55 @@ import warnings
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
+# pose estimation model setup
 body_with_feet = BodyWithFeet(
     to_openpose=False, mode="performance", backend="onnxruntime", device="cuda"
 )
+with open("properties.json", "r") as f:
+    properties = json.load(f)
+
+# valid depth interval
+clip_depth = [500.0, 5000.0]
+confidence_thr = 0.5
+radius = 2
+
+# kinect configuration
+config = Config(
+    color_format=pyk4a.ImageFormat.COLOR_BGRA32,
+    color_resolution=pyk4a.ColorResolution.RES_720P,
+    depth_mode=pyk4a.DepthMode.NFOV_2X2BINNED,
+    synchronized_images_only=True,
+    camera_fps=pyk4a.FPS.FPS_30,
+    depth_delay_off_color_usec=0,
+    wired_sync_mode=pyk4a.WiredSyncMode.STANDALONE,
+    subordinate_delay_off_master_usec=0,
+    disable_streaming_indicator=True,
+)
+
+# Initialize pose container and filters
+pose_frame = np.full((properties["pose"]["keypoints_count"], 5), np.nan)
+pose_sequence = np.copy(pose_frame)
+pose_filters = create_filters(
+    num_keypoints=properties["pose"]["keypoints_count"],
+    freq=pyk4a.FPS.FPS_30,
+    min_cutoff=1.0,
+    beta=0.3,
+)
+bone_filter = BoneConsistencyFilter(halpe26, fps=30)
 
 
 def main():
-    with open("properties.json", "r") as f:
-        properties = json.load(f)
-
-    # Initialize QApplication
-    app = QApplication(sys.argv)
-
-    clip_depth = [500.0, 5000.0]
-    confidence_thr = 0.5
-    radius = 2
-    config = Config(
-        color_format=pyk4a.ImageFormat.COLOR_BGRA32,
-        color_resolution=pyk4a.ColorResolution.RES_720P,
-        depth_mode=pyk4a.DepthMode.NFOV_2X2BINNED,
-        synchronized_images_only=True,
-        camera_fps=pyk4a.FPS.FPS_30,
-        depth_delay_off_color_usec=0,
-        wired_sync_mode=pyk4a.WiredSyncMode.STANDALONE,
-        subordinate_delay_off_master_usec=0,
-        disable_streaming_indicator=True,
-    )
+    # initialize & start kinect
     k4a = PyK4A(config=config)
     k4a.start()
 
     frame_times = []  # List to store timestamps of the last frames
 
-    # Initialize pose container and filters
-    pose_frame = np.full((properties["pose"]["keypoints_count"], 5), np.nan)
-    pose_sequence = np.copy(pose_frame)
-    pose_filters = create_filters(
-        num_keypoints=properties["pose"]["keypoints_count"],
-        freq=pyk4a.FPS.FPS_30,
-        min_cutoff=1.0,
-        beta=0.3,
-    )
-    bone_filter = BoneConsistencyFilter(halpe26, fps=30)
-
     # Initialize RealTimeViewer and PullTestMonitor
     viewer = RealTimeViewer(halpe26)
     pull_test_monitor = PullTestMonitor(properties, halpe26)
 
-    while True:
+    while viewer.isopen:
         capture = k4a.get_capture()
         current_time = time.time()
         frame_times.append(current_time)
@@ -67,6 +69,7 @@ def main():
         FPS = len(frame_times)
         # Remove frames older than 1 second
         frame_times = [t for t in frame_times if current_time - t <= 1.0]
+
         if np.any(capture.color):
             color = capture.color[:, :, :3]
             color = cv2.resize(color, (color.shape[1] // 4, color.shape[0] // 4))
@@ -124,7 +127,7 @@ def main():
 
     k4a.stop()
     # Exit the QApplication
-    sys.exit(app.exec_())
+    sys.exit(0)
 
 
 if __name__ == "__main__":
