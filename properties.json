@@ -1,0 +1,43 @@
+{
+    "stream": {
+        "average_win": 0.25
+    },
+    "pose": {
+      "keypoints_count": 26,
+      "average_win": 0.1
+    },
+    "filter":{
+        "savgol_win": 5,
+        "savgol_order": 2
+    },
+    "BOS": {
+      "keypoints": ["heel", "ankle", "small_toe", "big_toe"]
+    },
+    "COM": {
+      "body_segments": [
+        ["hip", "neck"],
+        ["left_hip", "left_knee"],
+        ["left_knee", "left_ankle"],
+        ["left_heel", "left_big_toe"],
+        ["right_hip", "right_knee"],
+        ["right_knee", "right_ankle"],
+        ["right_heel", "right_big_toe"]
+      ],
+      "body_segments_mass": [0.678, 0.1, 0.0465, 0.0145, 0.1, 0.0465, 0.0145],
+      "segment_pos": [0.626, 0.433, 0.0433, 0.5, 0.433, 0.433, 0.5],
+      "leg_length": ["heel", "hip"],
+      "scaling_factor": [1.2, 1.34]
+    },
+    "pull_test": {
+      "shoulder_kpts": ["right_shoulder", "right_shoulder"],
+      "baseline_thr": 1.0,
+      "baseline_win": 0.5,
+      "pull_thr": 3
+    },
+    "step_detection": {
+      "ankle_kpts": ["right_ankle", "left_ankle"],
+      "step_height_thr": 0.03,
+      "step_vel_thr": 0.5,
+      "step_len_thr": 0.05
+    }
+  }
