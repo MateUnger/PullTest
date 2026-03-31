@@ -29,7 +29,7 @@
       "scaling_factor": [1.2, 1.34]
     },
     "pull_test": {
-      "shoulder_kpts": ["right_shoulder", "right_shoulder"],
+      "shoulder_kpts": ["left_shoulder", "right_shoulder"],
       "baseline_thr": 1.0,
       "baseline_win": 0.5,
       "pull_thr": 3

@@ -118,6 +118,13 @@ def get_pose(
 
 
 class BoneConsistencyFilter:
+    """
+    Filters (rejects) 3D keypoints based on bone lenght.
+
+    Calculates baseline bone lenght (from predefined keypoint pairs - skeleton) for a given time window.
+    Rejects keypoint pairs (bones) if the length deviation from baseline exceeds threshold.
+    """
+
     def __init__(
         self,
         halpe26: dict,
@@ -127,6 +134,9 @@ class BoneConsistencyFilter:
         max_deviation: float = 0.3,
     ):
         """
+        Build keypoint pairs (bones) from the input dict (halpe26).
+        Set temporal buffer size for each bone's length.
+
         Args:
             halpe26 (dict): skeleton definition
             fps (float): frames per second
@@ -140,50 +150,68 @@ class BoneConsistencyFilter:
         self.max_deviation = max_deviation
 
         # Build bone list from halpe26
-        name_to_id = {v["name"]: k for k, v in halpe26["keypoint_info"].items()}
+        name_to_id = {info["name"]: kpt_idx for kpt_idx, info in halpe26["keypoint_info"].items()}
         self.bones = [
             (name_to_id[link[0]], name_to_id[link[1]])
             for link in [v["link"] for v in halpe26["skeleton_info"].values()]
             if link[0] in name_to_id and link[1] in name_to_id
         ]
 
+        # double-ended-que for buffer (can be modified at both ends)
         self.bone_length_buffers = {bone: deque(maxlen=self.buffer_size) for bone in self.bones}
         self.bone_baselines = {}
 
-    def update(self, pose_frame):
+    def update_bone_length_baseline(self, keypoints_3d):
+        """
+        Creates baseline bone lenght measurements by
+        calculating the length of each bone if there are enough values in the buffer.
+        """
         for bone in self.bones:
-            i, j = bone
-            pi, pj = pose_frame[i][1:4], pose_frame[j][1:4]
-            if not np.any(np.isnan(pi)) and not np.any(np.isnan(pj)):
-                length = np.linalg.norm(pi - pj)
+            kpt_idx_1, kpt_idx_2 = bone
+            # get the spatial coords (x,y,depth) for both keypoints in a bone
+            kpt_1, kpt_2 = keypoints_3d[kpt_idx_1][1:4], keypoints_3d[kpt_idx_2][1:4]
+
+            # there are no missing values in bone coords (kpt_1 and kpt_2)
+            if not np.any(np.isnan(kpt_1)) and not np.any(np.isnan(kpt_2)):
+                length = np.linalg.norm(kpt_1 - kpt_2)
                 self.bone_length_buffers[bone].append(length)
+
+                # buffer has the min required length (in time), register baseline lenght
                 if len(self.bone_length_buffers[bone]) >= self.min_valid_samples:
                     self.bone_baselines[bone] = np.median(self.bone_length_buffers[bone])
 
-    def filter(self, pose_frame):
+    def filter(self, keypoints_3d: np.ndarray) -> np.ndarray:
+        """
+        Rejects keypoint coords if bone length deviation is larger than threshold (compared to baseline).
+        """
         for bone in self.bones:
+            # no baseline, skip it
             if bone not in self.bone_baselines:
                 continue
-            i, j = bone
-            pi, pj = pose_frame[i][1:4], pose_frame[j][1:4]
-            if not np.any(np.isnan(pi)) and not np.any(np.isnan(pj)):
-                current_length = np.linalg.norm(pi - pj)
+            kpt_idx_1, kpt_idx_2 = bone
+            # get the spatial coords (x,y,depth) for both keypoints in a bone
+            kpt_1, kpt_2 = keypoints_3d[kpt_idx_1][1:4], keypoints_3d[kpt_idx_2][1:4]
+            # there are no missing values in bone coords (kpt_1 and kpt_2)
+            if not np.any(np.isnan(kpt_1)) and not np.any(np.isnan(kpt_2)):
+                current_length = np.linalg.norm(kpt_1 - kpt_2)
                 baseline = self.bone_baselines[bone]
                 deviation = abs(current_length - baseline) / baseline
                 if deviation > self.max_deviation:
-                    pose_frame[i, 1:4] = np.nan
-                    pose_frame[j, 1:4] = np.nan
-        return pose_frame
+                    keypoints_3d[kpt_idx_1, 1:4] = np.nan
+                    keypoints_3d[kpt_idx_2, 1:4] = np.nan
+        return keypoints_3d
 
-    def __call__(self, pose_frame):
-        self.update(pose_frame)
-        return self.filter(pose_frame)
+    def __call__(self, keypoints_3d: np.ndarray) -> np.ndarray:
+        self.update_bone_length_baseline(keypoints_3d)
+        return self.filter(keypoints_3d)
 
 
 class PullTestMonitor:
     def __init__(self, properties, halpe26):
         """
         Initialize the PullTestMonitor.
+
+        Set step detection- and pull-parameters, keypoint IDs.
 
         Args:
             properties (dict): Configuration properties from properties.json.
@@ -192,21 +220,25 @@ class PullTestMonitor:
         self.properties = properties
         self.halpe26 = halpe26
         self.baseline_thr = properties["pull_test"]["baseline_thr"]
-        self.baseline_win = properties["pull_test"]["baseline_win"]
+        self.baseline_winow_seconds = properties["pull_test"]["baseline_win"]
+
+        # TODO: there were 2 right_shoulders in properties, is that correct?
         self.shoulder_kpts = [
             self.get_keypoint_id(properties["pull_test"]["shoulder_kpts"][0]),
             self.get_keypoint_id(properties["pull_test"]["shoulder_kpts"][1]),
         ]
-        self.pull_thr = properties["pull_test"]["pull_thr"]
         self.ankle_kpts = [
             self.get_keypoint_id(properties["step_detection"]["ankle_kpts"][0]),
             self.get_keypoint_id(properties["step_detection"]["ankle_kpts"][1]),
         ]
+        self.pull_thr = properties["pull_test"]["pull_thr"]
+
+        # step detection parameters
         self.step_height_thr = properties["step_detection"]["step_height_thr"]
         self.step_vel_thr = properties["step_detection"]["step_vel_thr"]
         self.step_len_thr = properties["step_detection"]["step_len_thr"]
 
-    def get_keypoint_id(self, keypoint_name):
+    def get_keypoint_id(self, keypoint_name: str) -> int:
         """
         Get the keypoint ID from the halpe26 skeleton definition.
 
@@ -216,23 +248,26 @@ class PullTestMonitor:
         Returns:
             int: Keypoint ID.
         """
-        for kpt_id, kpt_info in self.halpe26["keypoint_info"].items():
+        for kpt_idx, kpt_info in self.halpe26["keypoint_info"].items():
             if kpt_info["name"] == keypoint_name:
-                return kpt_id
+                return kpt_idx
         raise ValueError(f"Keypoint '{keypoint_name}' not found in halpe26.")
 
-    def smooth_keypoints(self, pose_sequence, window_length=5, polyorder=2):
+    def smooth_keypoints(
+        self, pose_sequence: np.ndarray, window_length: int = 5, polyorder: int = 2
+    ) -> np.ndarray:
         """
         Smooth 3D keypoint sequences using a Savitzky-Golay filter.
 
         Args:
-            pose_sequence (np.ndarray): Sequence of poses (keypoints) with shape (num_keypoints, 4, num_frames).
+            pose_sequence (np.ndarray): Sequence of poses (keypoints) with shape (num_keypoints, 4, num_frames). # TODO: here the dims seem incorrect
             window_length (int): The length of the filter window (must be odd and >= polyorder + 1).
             polyorder (int): The order of the polynomial used to fit the samples.
 
         Returns:
             np.ndarray: Smoothed pose sequence with the same shape as the input.
         """
+        # TODO: pose_sequence shape is (26,5,frames), should be checking if it has 5 dims
         # Ensure pose_sequence has 4 dimensions (timestamp, x, y, z)
         if pose_sequence.shape[1] < 4:
             padding = np.full(
@@ -243,7 +278,8 @@ class PullTestMonitor:
         smoothed_sequence = np.copy(pose_sequence)
 
         for kpt_idx in range(pose_sequence.shape[0]):
-            for dim in range(1, 4):  # Smooth x, y, z dimensions (skip timestamp)
+            for dim in range(1, 4):  # Smooth x, y, z dimensions (skip timestamp, confidence score)
+                # dim is not all nans
                 if not np.isnan(pose_sequence[kpt_idx, dim, :]).all():
                     smoothed_sequence[kpt_idx, dim, :] = savgol_filter(
                         pose_sequence[kpt_idx, dim, :],
@@ -266,7 +302,7 @@ class PullTestMonitor:
             bool: True if acceleration is below the threshold for the baseline window, False otherwise.
         """
         pose_sequence = self.smooth_keypoints(pose_sequence)
-        required_frames = int(fps * self.baseline_win)
+        required_frames = int(fps * self.baseline_winow_seconds)
         if pose_sequence.shape[2] < required_frames:
             return False  # Not enough data available
 
@@ -297,38 +333,51 @@ class PullTestMonitor:
             return True
         return False
 
-    def compute_BOS(self, pose_sequence, fps):
+    # TODO: check if typehints are correct here
+    def compute_BOS(self, pose_sequence: np.ndarray, fps: float):
         """
         Computes the Base of Support (BOS) based on keypoints and properties.
 
         Args:
-            pose_sequence (np.ndarray): Sequence of poses (keypoints).
+            pose_sequence (np.ndarray): Sequence of poses (num_keypoints × (timestamp,x,depth,y,scores)(5) × frames)
             fps (float): Frames per second.
 
         Returns:
             np.ndarray: Computed BOS or NaN-filled array if data is invalid.
         """
-        pose_sequence = self.smooth_keypoints(pose_sequence)
+        # TODO: this is redundant at best, fn already receives smoothed sequence
+        # pose_sequence = self.smooth_keypoints(pose_sequence)
         keypoints_left = ["left_" + kpt for kpt in self.properties["BOS"]["keypoints"]]
         keypoints_right = ["right_" + kpt for kpt in self.properties["BOS"]["keypoints"]]
-        keypoints_kpts = [
+
+        # get indices of keypoints needed for BOS e.g.: [24, 15, 22, 20, 25, 16, 23, 21]
+        keypoint_indices = [
             kpt_id
             for kpt in keypoints_left + keypoints_right
             for kpt_id, kpt_info in self.halpe26["keypoint_info"].items()
             if kpt_info["name"] == kpt
         ]
+        keypoint_indices_left = [kpt_idx for kpt_idx in keypoint_indices if kpt_idx % 2 == 0]
+        keypoint_indices_right = [kpt_idx for kpt_idx in keypoint_indices if kpt_idx % 2 == 1]
 
         pose_sequence = np.copy(pose_sequence)
+        # TODO: not sure what this is
         frames = min([int(fps * self.properties["stream"]["average_win"]), pose_sequence.shape[2]])
-        pose_sequence = pose_sequence[keypoints_kpts, :, -frames:]
 
-        bos = pose_sequence[:, 1:3, :]  # Extract x and y coordinates
+        pose_sequence = pose_sequence[keypoint_indices, :, -frames:]
+        bos = pose_sequence[:, 1:3, :]  # Extract x and depth coordinates (horizontal ones)
+        # bos = pose_sequence[keypoints_indices, 1:3, -frames:]
+
+        # if keypoint data is all nan or empty return only-nan array
         if bos.size == 0 or np.isnan(bos).all():
-            return np.full((8, 2), np.nan)  # Return NaN-filled BOS if data is invalid
+            return np.full((8, 2), np.nan)
 
         # Compute height differences
-        height_left = np.nanmean(pose_sequence[: len(keypoints_left), 3, :], axis=1)
-        height_right = np.nanmean(pose_sequence[len(keypoints_left) :, 3, :], axis=1)
+        # TODO: one of these is definitely wrong
+        # height_left = np.nanmean(pose_sequence[: len(keypoints_left), 3, :], axis=1)
+        # height_right = np.nanmean(pose_sequence[len(keypoints_left) :, 3, :], axis=1)
+        height_left = np.nanmean(pose_sequence[keypoint_indices_left, 3, :], axis=1)
+        height_right = np.nanmean(pose_sequence[keypoint_indices_right, 3, :], axis=1)
         height_diff = height_left - height_right
 
         # Check height differences and adjust BOS
@@ -556,7 +605,7 @@ class PullTestMonitor:
         acceleration = np.nanmean(acceleration[:, 1, :], axis=0)
 
         # Compute baseline acceleration statistics
-        baseline = int(fps * self.baseline_win)
+        baseline = int(fps * self.baseline_winow_seconds)
         base_acc = acceleration[:baseline]
         base_acc_mean = np.nanmean(base_acc[base_acc > 0])
         base_acc_std = np.nanstd(base_acc[base_acc > 0])
@@ -591,18 +640,18 @@ class PullTestMonitor:
             print("pull detected")
         return pull_time, pull_magn
 
-    def update(self, pose_sequence, fps):
+    def update(self, pose_sequence: np.ndarray, fps: float) -> tuple:
         """
         Update the PullTestMonitor with the latest pose sequence.
 
         Args:
-            pose_sequence (np.ndarray): Sequence of poses (keypoints).
+            pose_sequence (np.ndarray): Sequence of poses (num_keypoints × (timestamp,x,y,depth,scores)(5) × frames)
             fps (float): Frames per second.
 
         Returns:
             tuple: BOS, xCOM, stability, baseline_met, step_time, nsteps, step_events, pull_time, pull_magn
         """
-        required_frames = int(fps * self.baseline_win)
+        required_frames = int(fps * self.baseline_winow_seconds)
 
         # Default return values
         BOS = np.full((8, 2), np.nan)
@@ -630,6 +679,7 @@ class PullTestMonitor:
             )
 
         # Smooth the pose sequence once before computations
+        # TODO: why is this needed, there was already a smooting step (OneEuroFilter)
         smoothed_pose_sequence = self.smooth_keypoints(pose_sequence)
 
         # Perform computations using the smoothed pose sequence
