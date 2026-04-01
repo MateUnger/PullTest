@@ -222,7 +222,6 @@ class PullTestMonitor:
         self.baseline_thr = properties["pull_test"]["baseline_thr"]
         self.baseline_winow_seconds = properties["pull_test"]["baseline_win"]
 
-        # TODO: there were 2 right_shoulders in properties, is that correct?
         self.shoulder_kpts = [
             self.get_keypoint_id(properties["pull_test"]["shoulder_kpts"][0]),
             self.get_keypoint_id(properties["pull_test"]["shoulder_kpts"][1]),
@@ -345,56 +344,51 @@ class PullTestMonitor:
         Returns:
             np.ndarray: Computed BOS or NaN-filled array if data is invalid.
         """
-        # TODO: this is redundant at best, fn already receives smoothed sequence
-        # pose_sequence = self.smooth_keypoints(pose_sequence)
-        keypoints_left = ["left_" + kpt for kpt in self.properties["BOS"]["keypoints"]]
-        keypoints_right = ["right_" + kpt for kpt in self.properties["BOS"]["keypoints"]]
-
-        # get indices of keypoints needed for BOS e.g.: [24, 15, 22, 20, 25, 16, 23, 21]
-        keypoint_indices = [
-            kpt_id
-            for kpt in keypoints_left + keypoints_right
-            for kpt_id, kpt_info in self.halpe26["keypoint_info"].items()
-            if kpt_info["name"] == kpt
-        ]
-        keypoint_indices_left = [kpt_idx for kpt_idx in keypoint_indices if kpt_idx % 2 == 0]
-        keypoint_indices_right = [kpt_idx for kpt_idx in keypoint_indices if kpt_idx % 2 == 1]
-
-        pose_sequence = np.copy(pose_sequence)
-        # TODO: not sure what this is
         frames = min([int(fps * self.properties["stream"]["average_win"]), pose_sequence.shape[2]])
 
-        pose_sequence = pose_sequence[keypoint_indices, :, -frames:]
-        bos = pose_sequence[:, 1:3, :]  # Extract x and depth coordinates (horizontal ones)
-        # bos = pose_sequence[keypoints_indices, 1:3, -frames:]
+        pose_sequence_interval = pose_sequence[:, :, -frames:]
+        # pose_sequence_interval = pose_sequence
+
+        left_ankle = pose_sequence_interval[15, :, :]
+        right_ankle = pose_sequence_interval[16, :, :]
+
+        # keypoints for the feet/soles (big_toe, small_toe, heel)
+        left_foot_kpt_indices = [15, 20, 22, 24]
+        left_foot = pose_sequence_interval[left_foot_kpt_indices, :, :]
+
+        right_foot_kpt_indices = [16, 21, 23, 25]
+        right_foot = pose_sequence_interval[right_foot_kpt_indices, :, :]
 
         # if keypoint data is all nan or empty return only-nan array
-        if bos.size == 0 or np.isnan(bos).all():
+        if (
+            left_foot.size == 0
+            or right_foot.size == 0
+            or np.isnan(left_foot).all()
+            or np.isnan(right_foot).all()
+        ):
             return np.full((8, 2), np.nan)
 
         # Compute height differences
-        # TODO: one of these is definitely wrong
-        # height_left = np.nanmean(pose_sequence[: len(keypoints_left), 3, :], axis=1)
-        # height_right = np.nanmean(pose_sequence[len(keypoints_left) :, 3, :], axis=1)
-        height_left = np.nanmean(pose_sequence[keypoint_indices_left, 3, :], axis=1)
-        height_right = np.nanmean(pose_sequence[keypoint_indices_right, 3, :], axis=1)
-        height_diff = height_left - height_right
+        height_left = left_ankle[3, :]
+        height_right = right_ankle[3, :]
+        height_diff = np.abs(height_left - height_right)
 
-        # Check height differences and adjust BOS
-        for i in range(len(height_diff)):
-            if np.abs(height_diff[i]) > self.properties["step_detection"]["step_height_thr"]:
-                if height_diff[i] > 0:
-                    bos[i, :, :] = np.nan
-                else:
-                    bos[i + len(keypoints_left), :, :] = np.nan
+        # if height diff between left and right feet is larger than threshold, disregard datapoint
+        # (only calculate BOS if both feet are on the ground)
+        invalid_indices = []
+        for idx, diff in enumerate(height_diff):
+            # height diff is larger than thr
+            if diff > self.step_height_thr:
+                invalid_indices.append(idx)
+        right_foot[:, :, invalid_indices] = np.full_like(right_foot[:, :, invalid_indices], np.nan)
+        left_foot[:, :, invalid_indices] = np.full_like(left_foot[:, :, invalid_indices], np.nan)
 
-        # Optionally average BOS over frames
-        bos = (
-            np.nanmean(bos, axis=2)
-            if bos.size > 0 and not np.isnan(bos).all() and np.any(~np.isnan(bos))
-            else np.full((8, 2), np.nan)
-        )
-        return bos
+        right_sole = np.nanmean(right_foot[:, 1:3, :], axis=2)
+        left_sole = np.nanmean(left_foot[:, 1:3, :], axis=2)
+
+        bos_both_feet = np.vstack([right_sole, left_sole])
+
+        return bos_both_feet
 
     def compute_xCOM(self, pose_sequence, fps):
         """
@@ -489,7 +483,7 @@ class PullTestMonitor:
         xcom = com_pos + (com_vel / np.sqrt(g / l))
         return np.nanmean(xcom, axis=0) if not np.isnan(xcom).all() else np.full((2,), np.nan)
 
-    def stability_detector(self, bos, xcom):
+    def stability_detector(self, bos: np.ndarray, xcom: np.ndarray) -> bool:
         """
         Determines whether the xCOM is within the BOS.
 
